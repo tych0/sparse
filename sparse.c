@@ -31,6 +31,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include "lib.h"
 #include "allocate.h"
@@ -259,6 +260,35 @@ static void check_no_kernel_pointers(struct position pos, struct expression_list
 	check_ptr_in_other_as(pos, base, 1);
 }
 
+static void check_copy_size(struct position pos, struct expression_list *args)
+{
+	struct expression *src = ptr_list_nth_entry((struct ptr_list *)args, 1);
+	struct expression *size = ptr_list_nth_entry((struct ptr_list *)args, 2);
+	long long src_actual = LLONG_MAX;
+	long long size_actual;
+	struct symbol *base = NULL;
+
+	/* get the type of src */
+	base = resolve_arg_type(pos, src);
+
+	/* and deref it to *src */
+	base = base->ctype.base_type;
+
+	src_actual = bits_to_bytes(base->bit_size);
+
+	/* Evaluate size, if we can */
+	size_actual = get_expression_value_silent(size);
+	/*
+	 * size_actual == 0 means that get_expression_value failed; of
+	 * course we'll miss something if there is a 0 length copy, but
+	 * then nothing will leak anyway so...
+	 */
+	if (size_actual == 0)
+		return;
+
+	if (size_actual > src_actual)
+		warning(pos, "copy_to_user() where size (%lld) is larger than src (%lld)", size_actual, src_actual);
+}
 
 #define check_memcpy check_memset
 #define check_cfu check_memset
@@ -267,6 +297,7 @@ void check_ctu(struct position pos, struct expression_list *args)
 {
 	check_memset(pos, args);
 	check_no_kernel_pointers(pos, args);
+	check_copy_size(pos, args);
 }
 
 struct checkfn {
