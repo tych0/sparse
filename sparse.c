@@ -171,12 +171,103 @@ static void check_memset(struct position pos, struct expression_list *args)
 	check_byte_count(pos, size);
 }
 
+static struct symbol *resolve_arg_type(struct position pos, struct expression *arg)
+{
+	struct expression *uncast;
+
+	uncast = arg;
+	switch (arg->type) {
+	case EXPR_CAST:
+	case EXPR_FORCE_CAST:
+	case EXPR_IMPLIED_CAST:
+		/*
+		 * Undo any casting done by sparse to the function's
+		 * argument type.
+		 */
+		uncast = arg->cast_expression;
+		break;
+	case EXPR_SYMBOL:
+		break;
+	case EXPR_PREOP:
+		/*
+		 * handle derefs; these are really just the type of the
+		 * resulting expression.
+		 */
+		break;
+	case EXPR_BINOP:
+		/* TODO: resolve this pointer math if possible? */
+		return NULL;
+	default:
+		warning(pos, "huh? arg not a cast or symbol? %d", arg->type);
+		return NULL;
+	}
+
+	return uncast->ctype->ctype.base_type;
+}
+
+static void check_ptr_in_other_as(struct position pos, struct symbol *sym, int this_as)
+{
+	struct ident *ident = sym->ident;
+
+	if (sym->type == SYM_NODE)
+		sym = sym->ctype.base_type;
+
+	switch (sym->type) {
+	case SYM_ARRAY:
+	case SYM_PTR: {
+		if (sym->ctype.as != this_as)
+			warning(pos, "member %s is a kernel pointer copied to userspace", show_ident(ident));
+		check_ptr_in_other_as(pos, sym->ctype.base_type, this_as);
+		break;
+	}
+	case SYM_STRUCT:
+	case SYM_UNION: {
+		struct symbol *member;
+
+		FOR_EACH_PTR(sym->symbol_list, member) {
+			check_ptr_in_other_as(pos, member, this_as);
+		} END_FOR_EACH_PTR(member);
+		break;
+	}
+	default:
+		/*
+		 * scalar types are ok
+		 * TODO: what about SYM_LABEL/PREPROCESSOR?
+		 */
+		break;
+	}
+}
+
+static void check_no_kernel_pointers(struct position pos, struct expression_list *args)
+{
+	struct expression *src = ptr_list_nth_entry((struct ptr_list *)args, 1);
+	struct symbol *base = NULL;
+
+	if (!Waddress_space)
+		return;
+
+	/* get the type of src */
+	base = resolve_arg_type(pos, src);
+
+	/*
+	 * And deref it to *src; src will *always* be a kernel pointer, and
+	 * we're really after members of structures here, not the pointers
+	 * themselves. So we do this deref at the top level.
+	 */
+	base = base->ctype.base_type;
+
+	check_ptr_in_other_as(pos, base, 1);
 }
 
 
 #define check_memcpy check_memset
-#define check_ctu check_memset
 #define check_cfu check_memset
+
+void check_ctu(struct position pos, struct expression_list *args)
+{
+	check_memset(pos, args);
+	check_no_kernel_pointers(pos, args);
+}
 
 struct checkfn {
 	struct ident *id;
